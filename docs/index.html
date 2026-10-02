@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HacknPlan Tareas</title>
+  <style>
+    :root { --bg:#2b2b2b; --panel:#363636; --field:#1e1e1e; --border:#555; --fg:#e6e6e6; --muted:#9a9a9a;
+            --accent:#3d8fd1; --ok:#5cb85c; --err:#e9262b; }
+    * { box-sizing: border-box; }
+    [hidden] { display:none !important; }
+    body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 "Segoe UI", system-ui, sans-serif; }
+    .wrap { max-width:640px; margin:0 auto; }
+    input, textarea, select { width:100%; padding:9px 11px; border:1px solid var(--border); border-radius:6px;
+                              background:var(--field); color:var(--fg); font:inherit; }
+    input:focus, textarea:focus, select:focus { outline:none; border-color:var(--accent); }
+    button { padding:10px 18px; border:0; border-radius:6px; font-weight:600; font-size:15px; font-family:inherit;
+             cursor:pointer; background:var(--panel); color:var(--fg); }
+    button.primary { background:var(--accent); color:#fff; }
+    button:disabled { opacity:.5; cursor:default; }
+    .ok { color:var(--ok); } .err { color:var(--err); }
+
+    /* Login */
+    #login { min-height:100vh; display:grid; place-items:center; padding:16px; }
+    #login form { width:100%; max-width:340px; background:var(--panel); border-radius:10px; padding:24px; }
+    #login h1 { margin:0 0 16px; font-size:20px; }
+    #login button { width:100%; margin-top:12px; }
+    #login-error { margin:10px 0 0; font-size:14px; min-height:1.2em; }
+
+    /* Formulario */
+    header { background:var(--panel); padding:14px 16px; }
+    header .top { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+    header h1 { margin:0; font-size:20px; }
+    header button { padding:0; background:none; color:var(--muted); font-size:13px; font-weight:400;
+                    text-decoration:underline; }
+    #board { color:var(--muted); font-size:13px; margin-top:4px; }
+    main { padding:16px; }
+    .row { display:grid; grid-template-columns:130px 1fr; gap:12px; align-items:start; margin-bottom:14px; }
+    .row > label, .row > .label { font-weight:600; text-align:right; padding-top:9px; }
+    textarea { min-height:120px; resize:vertical; }
+    #cost { width:100px; }
+    #users { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:6px 16px; padding-top:8px; }
+    #users label { display:flex; align-items:center; gap:8px; cursor:pointer; }
+    #users input { width:auto; accent-color:var(--accent); }
+    .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
+    #status { margin-top:14px; min-height:1.4em; color:var(--muted); overflow-wrap:anywhere; }
+    @media (max-width:560px) {
+      .row { grid-template-columns:1fr; gap:4px; }
+      .row > label, .row > .label { text-align:left; padding-top:0; }
+      .actions button { flex:1; }
+    }
+  </style>
+</head>
+<body>
+  <section id="login" hidden>
+    <form id="login-form">
+      <h1>HacknPlan Tareas</h1>
+      <input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required>
+      <button type="submit" class="primary">Entrar</button>
+      <p id="login-error" class="err"></p>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <header>
+      <div class="wrap">
+        <div class="top"><h1>Nueva tarea</h1><button type="button" id="logout">Salir</button></div>
+        <div id="board">Cargando datos del proyecto...</div>
+      </div>
+    </header>
+    <main class="wrap">
+      <form id="form" autocomplete="off">
+        <div class="row"><label for="title">Título</label><input id="title" required></div>
+        <div class="row"><label for="description">Descripción</label><textarea id="description"></textarea></div>
+        <div class="row"><label for="category">Categoría</label><select id="category"></select></div>
+        <div class="row"><label for="importance">Importancia</label><select id="importance"></select></div>
+        <div class="row"><label for="cost">Coste estimado</label>
+          <input id="cost" type="number" min="0" step="0.5" value="0"></div>
+        <div class="row"><span class="label">Asignar a</span><div id="users"></div></div>
+        <div class="actions">
+          <button type="button" id="clear">Limpiar</button>
+          <button type="submit" id="create" class="primary" disabled>Crear tarea</button>
+        </div>
+        <div id="status"></div>
+      </form>
+    </main>
+  </div>
+
+  <script>
+    // URL de tu Cloudflare Worker (sin barra final). Es pública: no es un secreto.
+    const WORKER_URL = "https://hacknplan-tareas.TU-SUBDOMINIO.workers.dev";
+
+    const $ = (id) => document.getElementById(id);
+    const fmt = (d) => d ? new Date(d).toLocaleDateString("es-AR") : "-";
+    const KEY = "hacknplan-password";
+    const store = {
+      get() { try { return localStorage.getItem(KEY) || ""; } catch { return ""; } },
+      set(v) { try { localStorage.setItem(KEY, v); } catch {} },
+      clear() { try { localStorage.removeItem(KEY); } catch {} },
+    };
+    let password = store.get();
+
+    class AuthError extends Error {}
+
+    async function call(path, options = {}) {
+      const res = await fetch(WORKER_URL + path, {
+        ...options,
+        headers: { ...(options.headers || {}), "X-App-Password": password },
+      });
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      if (res.status === 401) throw new AuthError(data.error || "Contraseña incorrecta");
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      return data;
+    }
+
+    function showLogin(message = "") {
+      $("app").hidden = true;
+      $("login").hidden = false;
+      $("login-error").textContent = message;
+      $("password").value = "";
+      $("password").focus();
+    }
+
+    function setStatus(text, cls = "") {
+      $("status").textContent = text;
+      $("status").className = cls;
+    }
+
+    function fillSelect(select, items, selected) {
+      select.replaceChildren(...items.map((name) => new Option(name, name, false, name === selected)));
+    }
+
+    async function load() {
+      const m = await call("/meta");
+      $("login").hidden = true;
+      $("app").hidden = false;
+      $("board").textContent =
+        `Tablero: ${m.board.name} · ${fmt(m.board.startDate)} → ${fmt(m.board.dueDate)} · Design: ${m.designElement}`;
+      fillSelect($("category"), m.categories,
+                 m.categories.includes(m.defaultCategory) ? m.defaultCategory : m.categories[0]);
+      const def = m.importance.find((l) => l.isDefault) || m.importance[0];
+      fillSelect($("importance"), m.importance.map((l) => l.name), def && def.name);
+      $("users").replaceChildren(...m.users.map((u) => {
+        const label = document.createElement("label");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.value = u.username;
+        label.append(box, u.name);
+        return label;
+      }));
+      $("create").disabled = false;
+      setStatus("Listo. Ctrl+Enter para crear la tarea.");
+      $("title").focus();
+    }
+
+    async function start() {
+      if (WORKER_URL.includes("TU-SUBDOMINIO")) {
+        showLogin("Falta configurar WORKER_URL en docs/index.html.");
+        return;
+      }
+      if (!password) { showLogin(); return; }
+      try {
+        await load();
+      } catch (e) {
+        if (e instanceof AuthError) { store.clear(); password = ""; showLogin(e.message); }
+        else { $("login").hidden = true; $("app").hidden = false;
+               $("board").textContent = "No se pudieron cargar los datos"; setStatus(e.message, "err"); }
+      }
+    }
+
+    $("login-form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      password = $("password").value;
+      $("login-error").textContent = "Entrando...";
+      try {
+        await load();
+        store.set(password);
+      } catch (e) {
+        password = "";
+        showLogin(e instanceof AuthError ? e.message : `No se pudo conectar: ${e.message}`);
+      }
+    });
+
+    $("logout").addEventListener("click", () => {
+      store.clear();
+      password = "";
+      showLogin();
+    });
+
+    $("form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      if ($("create").disabled) return;
+      const title = $("title").value.trim();
+      if (!title) { setStatus("El título es obligatorio.", "err"); return; }
+      $("create").disabled = true;
+      setStatus("Creando tarea...");
+      try {
+        const t = await call("/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            description: $("description").value,
+            category: $("category").value,
+            importance: $("importance").value,
+            cost: $("cost").value,
+            assign: [...document.querySelectorAll("#users input:checked")].map((b) => b.value),
+          }),
+        });
+        setStatus(`✔ Tarea creada: #${t.workItemId} - ${t.title} (${t.board})`, "ok");
+        $("title").value = "";
+        $("description").value = "";
+        $("title").focus();
+      } catch (e) {
+        if (e instanceof AuthError) { store.clear(); password = ""; showLogin(e.message); }
+        else setStatus(e.message, "err");
+      } finally {
+        $("create").disabled = false;
+      }
+    });
+
+    $("clear").addEventListener("click", () => {
+      $("title").value = "";
+      $("description").value = "";
+      $("cost").value = "0";
+      document.querySelectorAll("#users input").forEach((b) => (b.checked = false));
+      setStatus("");
+      $("title").focus();
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.ctrlKey && e.key === "Enter" && !$("app").hidden) $("form").requestSubmit();
+    });
+
+    start();
+  </script>
+</body>
+</html>
