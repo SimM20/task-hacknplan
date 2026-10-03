@@ -10,6 +10,8 @@
  *   GET  /meta   -> tablero actual, categorías, importancias, usuarios, milestones y propuesta de tablero
  *   POST /tasks  -> crea la tarea en el último tablero, Design = Gameplay, fechas del tablero
  *   POST /boards -> crea un tablero nuevo (pasa a ser el "último tablero" para las tareas)
+ *   POST /move   -> mueve una tanda de tareas sin terminar de un tablero a otro (la página repite
+ *                   hasta que no queden; el plan gratis de Cloudflare limita las llamadas por petición)
  */
 
 const API = "https://api.hacknplan.com/v0";
@@ -43,6 +45,9 @@ export default {
       }
       if (pathname === "/boards" && request.method === "POST") {
         return json(await createBoard(hp, await request.json().catch(() => ({}))));
+      }
+      if (pathname === "/move" && request.method === "POST") {
+        return json(await moveUnfinished(hp, await request.json().catch(() => ({}))));
       }
       return json({ error: "No encontrado" }, 404);
     } catch (err) {
@@ -96,7 +101,11 @@ function hacknplan(env) {
     // Algunos endpoints devuelven lista directa, otros {"items": [...]}
     return data && !Array.isArray(data) && Array.isArray(data.items) ? data.items : data;
   };
-  return { get: (path) => call("GET", path), post: (path, body) => call("POST", path, body) };
+  return {
+    get: (path) => call("GET", path),
+    post: (path, body) => call("POST", path, body),
+    patch: (path, body) => call("PATCH", path, body),
+  };
 }
 
 const norm = (s) => (s || "").trim().toLowerCase();
@@ -145,6 +154,20 @@ function suggestNextBoard(last) {
   return { name, startDate: start, dueDate: addDays(start, days), milestoneId: last.milestoneId ?? null };
 }
 
+const PAGE_SIZE = 100;  // máximo que acepta HacknPlan
+const MOVE_BATCH = 35;  // tareas por petición a /move (deja margen al límite de ~50 llamadas del plan gratis)
+
+/** Tareas del tablero cuya etapa no está cerrada (Planned, In progress, Testing...). */
+async function listUnfinished(hp, boardId) {
+  const items = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const page = await hp.get(`/workitems?boardId=${boardId}&offset=${offset}&limit=${PAGE_SIZE}`);
+    items.push(...page);
+    if (page.length < PAGE_SIZE) break;
+  }
+  return items.filter((i) => (i.stage && i.stage.status) !== "closed");
+}
+
 // ---------------------------------------------------------------- endpoints
 
 async function getMeta(hp) {
@@ -156,8 +179,10 @@ async function getMeta(hp) {
     hp.get("/milestones"),
     getDesignElementId(hp), // solo valida que exista "Gameplay"
   ]);
+  const unfinished = await listUnfinished(hp, board.boardId);
   return {
-    board: { boardId: board.boardId, name: board.name, startDate: board.startDate, dueDate: board.dueDate },
+    board: { boardId: board.boardId, name: board.name, startDate: board.startDate, dueDate: board.dueDate,
+             unfinished: unfinished.length },
     nextBoard: suggestNextBoard(board),
     designElement: DESIGN_ELEMENT_NAME,
     categories: categories.map((c) => c.name),
@@ -187,7 +212,29 @@ async function createBoard(hp, data) {
   if (data.milestoneId) payload.milestoneId = Number(data.milestoneId);
 
   const board = await hp.post("/boards", payload);
-  return { boardId: board.boardId, name: board.name, startDate: board.startDate, dueDate: board.dueDate };
+  return {
+    boardId: board.boardId, name: board.name, startDate: board.startDate, dueDate: board.dueDate,
+    previous: { boardId: last.boardId, name: last.name },  // de aquí salen las tareas a mover
+  };
+}
+
+async function moveUnfinished(hp, data) {
+  const from = Number(data.fromBoardId), to = Number(data.toBoardId);
+  if (!from || !to || from === to) throw fail("Tableros de origen/destino no válidos.");
+
+  const [target, unfinished] = await Promise.all([hp.get(`/boards/${to}`), listUnfinished(hp, from)]);
+  const batch = unfinished.slice(0, MOVE_BATCH);
+  const failed = [];
+  // De a 5 en paralelo para no saturar la API
+  for (let i = 0; i < batch.length; i += 5) {
+    await Promise.all(batch.slice(i, i + 5).map((item) =>
+      hp.patch(`/workitems/${item.workItemId}`, {
+        boardId: to,
+        startDate: target.startDate,
+        dueDate: target.dueDate,
+      }).catch((err) => failed.push(`#${item.workItemId} ${item.title}: ${err.message}`))));
+  }
+  return { moved: batch.length - failed.length, remaining: unfinished.length - batch.length, failed };
 }
 
 async function createTask(hp, data) {

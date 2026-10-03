@@ -51,6 +51,9 @@
                    border-bottom:2px solid transparent; }
     .tabs button[aria-selected="true"] { color:var(--fg); border-bottom-color:var(--accent); }
     .hint { color:var(--muted); font-size:13px; margin:0 0 16px; }
+    .row > label.check { display:flex; align-items:flex-start; gap:8px; padding-top:9px; cursor:pointer;
+                         font-weight:400; text-align:left; }
+    .check input { width:auto; margin-top:3px; accent-color:var(--accent); }
     @media (max-width:560px) {
       .row { grid-template-columns:1fr; gap:4px; }
       .row > label, .row > .label { text-align:left; padding-top:0; }
@@ -87,6 +90,9 @@
         <div class="row"><label for="b-due">Due date</label><input id="b-due" type="date" required></div>
         <div class="row"><label for="b-milestone">Milestone</label><select id="b-milestone"></select></div>
         <div class="row"><label for="b-description">Descripción</label><textarea id="b-description"></textarea></div>
+        <div class="row"><span class="label">Tareas</span>
+          <label class="check"><input type="checkbox" id="b-move" checked>
+            <span id="b-move-text">Mover las tareas sin terminar del tablero actual</span></label></div>
         <div class="actions">
           <button type="submit" id="b-create" class="primary" disabled>Crear tablero</button>
         </div>
@@ -203,6 +209,12 @@
                  [["", "Sin milestone"], ...(m.milestones || []).map((x) => [x.milestoneId, x.name])],
                  next.milestoneId ?? "");
       $("b-description").value = "";
+      const pending = m.board.unfinished;
+      $("b-move-text").textContent = pending == null
+        ? `Mover las tareas sin terminar de ${m.board.name}`
+        : `Mover las ${pending} tareas sin terminar de ${m.board.name} (las completadas se quedan ahí)`;
+      $("b-move").checked = pending !== 0;
+      $("b-move").disabled = pending === 0;
       $("b-create").disabled = false;
 
       setStatus("Listo. Ctrl+Enter para crear la tarea.");
@@ -301,8 +313,10 @@
         setStatus("La due date no puede ser anterior al inicio.", "err", "board-status"); return;
       }
       const milestone = $("b-milestone").selectedOptions[0].text;
+      const move = $("b-move").checked && !$("b-move").disabled;
       if (!confirm(`¿Crear el tablero "${board.name}" (${fmt(board.startDate)} → ${fmt(board.dueDate)}, ` +
-                   `${milestone})?\n\nLas tareas nuevas irán a este tablero.`)) return;
+                   `${milestone})?\n\nLas tareas nuevas irán a este tablero.` +
+                   (move ? `\n${$("b-move-text").textContent.replace(/^Mover/, "Se moverán")}.` : ""))) return;
 
       $("b-create").disabled = true;
       setStatus("Creando tablero...", "", "board-status");
@@ -312,10 +326,39 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(board),
         });
+
+        let summary = `✔ Tablero creado: ${b.name}. Las tareas nuevas van a este tablero.`, cls = "ok";
+        if (move) {
+          // El Worker mueve una tanda por llamada; se repite hasta que no queden (o no avance)
+          let moved = 0, failed = [];
+          try {
+            for (let round = 0; round < 50; round++) {
+              setStatus(`Tablero creado. Moviendo tareas sin terminar... (${moved} movidas)`, "", "board-status");
+              const r = await call("/move", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ fromBoardId: b.previous.boardId, toBoardId: b.boardId }),
+              });
+              moved += r.moved;
+              failed = r.failed;
+              if (r.moved === 0 || (r.remaining === 0 && !r.failed.length)) break;
+            }
+            summary = `✔ Tablero creado: ${b.name}. Se movieron ${moved} tareas sin terminar desde ${b.previous.name}.`;
+            if (failed.length) {
+              summary += ` No se pudieron mover ${failed.length}: ${failed.join(" · ")}`;
+              cls = "err";
+            }
+          } catch (e) {
+            if (e instanceof AuthError) throw e;
+            summary = `Tablero ${b.name} creado, pero falló al mover tareas (${moved} movidas): ${e.message}`;
+            cls = "err";
+          }
+        }
+
         setStatus("", "", "board-status");
         await load();  // refresca el tablero actual y la propuesta del siguiente
         showTab("form");
-        setStatus(`✔ Tablero creado: ${b.name}. Las tareas nuevas van a este tablero.`, "ok");
+        setStatus(summary, cls);
       } catch (e) {
         if (e instanceof AuthError) { store.clear(); password = ""; showLogin(e.message); }
         else setStatus(e.message, "err", "board-status");

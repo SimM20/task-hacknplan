@@ -3,6 +3,8 @@
 Crea tareas en el último tablero del proyecto, con Design = Gameplay y las fechas del tablero.
 Desde la web también se pueden crear tableros nuevos (propone el siguiente sprint: nombre +1,
 empieza cuando vence el último y dura lo mismo); las tareas siguientes van a ese tablero.
+Al crear un tablero, opcionalmente mueve las tareas sin terminar (etapa distinta de Completed)
+del tablero anterior al nuevo, con las fechas del nuevo. Las completadas se quedan donde estaban.
 
 | Archivo | Para qué |
 |---|---|
