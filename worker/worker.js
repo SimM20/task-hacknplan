@@ -7,8 +7,9 @@
  *   ALLOWED_ORIGIN  p.ej. https://tuusuario.github.io  (si no se define, acepta cualquier origen)
  *
  * Endpoints (todos piden la cabecera X-App-Password):
- *   GET  /meta   -> tablero actual, categorías, importancias y usuarios
+ *   GET  /meta   -> tablero actual, categorías, importancias, usuarios, milestones y propuesta de tablero
  *   POST /tasks  -> crea la tarea en el último tablero, Design = Gameplay, fechas del tablero
+ *   POST /boards -> crea un tablero nuevo (pasa a ser el "último tablero" para las tareas)
  */
 
 const API = "https://api.hacknplan.com/v0";
@@ -39,6 +40,9 @@ export default {
       if (pathname === "/meta" && request.method === "GET") return json(await getMeta(hp));
       if (pathname === "/tasks" && request.method === "POST") {
         return json(await createTask(hp, await request.json().catch(() => ({}))));
+      }
+      if (pathname === "/boards" && request.method === "POST") {
+        return json(await createBoard(hp, await request.json().catch(() => ({}))));
       }
       return json({ error: "No encontrado" }, 404);
     } catch (err) {
@@ -122,24 +126,68 @@ async function getDesignElementId(hp) {
   return found.designElementId;
 }
 
+// Fechas: la API usa "YYYY-MM-DDTHH:MM:SS"; la página trabaja con "YYYY-MM-DD".
+const DAY_MS = 86400000;
+const datePart = (iso) => (iso || "").slice(0, 10);
+const timePart = (iso, fallback = "00:00:00") => (iso && iso.length > 11 ? iso.slice(11, 19) : fallback);
+const toMs = (date) => Date.parse(`${date}T00:00:00Z`);
+const addDays = (date, days) => new Date(toMs(date) + days * DAY_MS).toISOString().slice(0, 10);
+const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || "") && !Number.isNaN(toMs(s));
+
+/** Propone el siguiente tablero: nombre +1, empieza cuando vence el último y dura lo mismo. */
+function suggestNextBoard(last) {
+  const m = (last.name || "").match(/^(.*?)(\d+)(\D*)$/);
+  const name = m ? `${m[1]}${Number(m[2]) + 1}${m[3]}` : "";
+  const start = datePart(last.dueDate) || new Date().toISOString().slice(0, 10);
+  const days = last.startDate && last.dueDate
+    ? Math.max(1, Math.round((toMs(datePart(last.dueDate)) - toMs(datePart(last.startDate))) / DAY_MS))
+    : 14;
+  return { name, startDate: start, dueDate: addDays(start, days), milestoneId: last.milestoneId ?? null };
+}
+
 // ---------------------------------------------------------------- endpoints
 
 async function getMeta(hp) {
-  const [board, categories, levels, users] = await Promise.all([
+  const [board, categories, levels, users, milestones] = await Promise.all([
     getLastBoard(hp),
     hp.get("/categories"),
     hp.get("/importancelevels"),
     hp.get("/users"),
+    hp.get("/milestones"),
     getDesignElementId(hp), // solo valida que exista "Gameplay"
   ]);
   return {
     board: { boardId: board.boardId, name: board.name, startDate: board.startDate, dueDate: board.dueDate },
+    nextBoard: suggestNextBoard(board),
     designElement: DESIGN_ELEMENT_NAME,
     categories: categories.map((c) => c.name),
     defaultCategory: DEFAULT_CATEGORY,
     importance: levels.map((l) => ({ name: l.name, isDefault: !!l.isDefault })),
     users: users.map((u) => u.user || u).map((u) => ({ username: u.username, name: u.name || u.username })),
+    milestones: (milestones || []).map((m) => ({ milestoneId: m.milestoneId, name: m.name })),
   };
+}
+
+async function createBoard(hp, data) {
+  const name = (data.name || "").trim();
+  if (!name) throw fail("El nombre del tablero es obligatorio.");
+  if (!isDate(data.startDate) || !isDate(data.dueDate)) throw fail("Las fechas no son válidas.");
+  if (data.dueDate < data.startDate) throw fail("La due date no puede ser anterior a la fecha de inicio.");
+
+  const [last, allBoards] = await Promise.all([getLastBoard(hp), hp.get("/boards?includeClosed=true")]);
+  if (allBoards.some((b) => norm(b.name) === norm(name))) throw fail(`Ya existe un tablero llamado '${name}'.`);
+
+  // Misma hora que los tableros existentes, para que HacknPlan muestre los mismos días
+  const payload = {
+    name,
+    description: (data.description || "").trim(),
+    startDate: `${data.startDate}T${timePart(last.startDate)}`,
+    dueDate: `${data.dueDate}T${timePart(last.dueDate)}`,
+  };
+  if (data.milestoneId) payload.milestoneId = Number(data.milestoneId);
+
+  const board = await hp.post("/boards", payload);
+  return { boardId: board.boardId, name: board.name, startDate: board.startDate, dueDate: board.dueDate };
 }
 
 async function createTask(hp, data) {

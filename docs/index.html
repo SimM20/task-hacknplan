@@ -31,7 +31,7 @@
     header { background:var(--panel); padding:14px 16px; }
     header .top { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
     header h1 { margin:0; font-size:20px; }
-    header button { padding:0; background:none; color:var(--muted); font-size:13px; font-weight:400;
+    #logout { padding:0; background:none; color:var(--muted); font-size:13px; font-weight:400;
                     text-decoration:underline; }
     #board { color:var(--muted); font-size:13px; margin-top:4px; }
     main { padding:16px; }
@@ -43,7 +43,14 @@
     #users label { display:flex; align-items:center; gap:8px; cursor:pointer; }
     #users input { width:auto; accent-color:var(--accent); }
     .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
-    #status { margin-top:14px; min-height:1.4em; color:var(--muted); overflow-wrap:anywhere; }
+    .status { margin-top:14px; min-height:1.4em; color:var(--muted); overflow-wrap:anywhere; }
+    .status.ok { color:var(--ok); } .status.err { color:var(--err); }
+    input[type="date"] { width:auto; min-width:170px; color-scheme:dark; }
+    .tabs { display:flex; gap:4px; margin-top:12px; }
+    .tabs button { background:none; color:var(--muted); padding:6px 14px; border-radius:6px 6px 0 0;
+                   border-bottom:2px solid transparent; }
+    .tabs button[aria-selected="true"] { color:var(--fg); border-bottom-color:var(--accent); }
+    .hint { color:var(--muted); font-size:13px; margin:0 0 16px; }
     @media (max-width:560px) {
       .row { grid-template-columns:1fr; gap:4px; }
       .row > label, .row > .label { text-align:left; padding-top:0; }
@@ -64,11 +71,28 @@
   <div id="app" hidden>
     <header>
       <div class="wrap">
-        <div class="top"><h1>Nueva tarea</h1><button type="button" id="logout">Salir</button></div>
+        <div class="top"><h1>HacknPlan</h1><button type="button" id="logout">Salir</button></div>
         <div id="board">Cargando datos del proyecto...</div>
+        <nav class="tabs" role="tablist">
+          <button type="button" role="tab" data-tab="form" aria-selected="true">Nueva tarea</button>
+          <button type="button" role="tab" data-tab="board-form" aria-selected="false">Nuevo tablero</button>
+        </nav>
       </div>
     </header>
     <main class="wrap">
+      <form id="board-form" autocomplete="off" hidden>
+        <p class="hint">Al crearlo pasa a ser el tablero de las tareas nuevas, que usarán sus fechas.</p>
+        <div class="row"><label for="b-name">Nombre</label><input id="b-name" required></div>
+        <div class="row"><label for="b-start">Inicio</label><input id="b-start" type="date" required></div>
+        <div class="row"><label for="b-due">Due date</label><input id="b-due" type="date" required></div>
+        <div class="row"><label for="b-milestone">Milestone</label><select id="b-milestone"></select></div>
+        <div class="row"><label for="b-description">Descripción</label><textarea id="b-description"></textarea></div>
+        <div class="actions">
+          <button type="submit" id="b-create" class="primary" disabled>Crear tablero</button>
+        </div>
+        <div id="board-status" class="status"></div>
+      </form>
+
       <form id="form" autocomplete="off">
         <div class="row"><label for="title">Título</label><input id="title" required></div>
         <div class="row"><label for="description">Descripción</label><textarea id="description"></textarea></div>
@@ -81,7 +105,7 @@
           <button type="button" id="clear">Limpiar</button>
           <button type="submit" id="create" class="primary" disabled>Crear tarea</button>
         </div>
-        <div id="status"></div>
+        <div id="status" class="status"></div>
       </form>
     </main>
   </div>
@@ -91,7 +115,8 @@
     const WORKER_URL = "https://hacknplan-tareas.simon-moraleslozano.workers.dev";
 
     const $ = (id) => document.getElementById(id);
-    const fmt = (d) => d ? new Date(d).toLocaleDateString("es-AR") : "-";
+    // "2026-09-22T21:00:00" o "2026-09-22" -> "22/09/2026" (sin conversiones de zona horaria)
+    const fmt = (d) => d ? d.slice(0, 10).split("-").reverse().join("/") : "-";
     const KEY = "hacknplan-password";
     const store = {
       get() { try { return localStorage.getItem(KEY) || ""; } catch { return ""; } },
@@ -121,13 +146,26 @@
       $("password").focus();
     }
 
-    function setStatus(text, cls = "") {
-      $("status").textContent = text;
-      $("status").className = cls;
+    function setStatus(text, cls = "", id = "status") {
+      $(id).textContent = text;
+      $(id).className = `status ${cls}`;
     }
 
     function fillSelect(select, items, selected) {
-      select.replaceChildren(...items.map((name) => new Option(name, name, false, name === selected)));
+      // items: nombres, o pares [valor, texto]
+      select.replaceChildren(...items.map((it) => {
+        const [value, text] = Array.isArray(it) ? it : [it, it];
+        return new Option(text, value, false, String(value) === String(selected));
+      }));
+    }
+
+    function showTab(id) {
+      for (const tab of document.querySelectorAll(".tabs button")) {
+        const active = tab.dataset.tab === id;
+        tab.setAttribute("aria-selected", active);
+        $(tab.dataset.tab).hidden = !active;
+      }
+      $(id === "form" ? "title" : "b-name").focus();
     }
 
     async function load() {
@@ -136,19 +174,37 @@
       $("app").hidden = false;
       $("board").textContent =
         `Tablero: ${m.board.name} · ${fmt(m.board.startDate)} → ${fmt(m.board.dueDate)} · Design: ${m.designElement}`;
-      fillSelect($("category"), m.categories,
-                 m.categories.includes(m.defaultCategory) ? m.defaultCategory : m.categories[0]);
+
+      // Formulario de tarea (si se recarga, conserva lo que ya estaba elegido)
+      const keep = (select, items, fallback) => items.includes(select.value) ? select.value : fallback;
+      fillSelect($("category"), m.categories, keep($("category"), m.categories,
+                 m.categories.includes(m.defaultCategory) ? m.defaultCategory : m.categories[0]));
+      const levels = m.importance.map((l) => l.name);
       const def = m.importance.find((l) => l.isDefault) || m.importance[0];
-      fillSelect($("importance"), m.importance.map((l) => l.name), def && def.name);
+      fillSelect($("importance"), levels, keep($("importance"), levels, def && def.name));
+      const checked = new Set([...document.querySelectorAll("#users input:checked")].map((b) => b.value));
       $("users").replaceChildren(...m.users.map((u) => {
         const label = document.createElement("label");
         const box = document.createElement("input");
         box.type = "checkbox";
         box.value = u.username;
+        box.checked = checked.has(u.username);
         label.append(box, u.name);
         return label;
       }));
       $("create").disabled = false;
+
+      // Formulario de tablero: propuesta del siguiente
+      const next = m.nextBoard || {};  // vacío si el Worker es una versión anterior
+      $("b-name").value = next.name || "";
+      $("b-start").value = next.startDate || "";
+      $("b-due").value = next.dueDate || "";
+      fillSelect($("b-milestone"),
+                 [["", "Sin milestone"], ...(m.milestones || []).map((x) => [x.milestoneId, x.name])],
+                 next.milestoneId ?? "");
+      $("b-description").value = "";
+      $("b-create").disabled = false;
+
       setStatus("Listo. Ctrl+Enter para crear la tarea.");
       $("title").focus();
     }
@@ -228,8 +284,52 @@
       $("title").focus();
     });
 
+    $("board-form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      if ($("b-create").disabled) return;
+      const board = {
+        name: $("b-name").value.trim(),
+        startDate: $("b-start").value,
+        dueDate: $("b-due").value,
+        milestoneId: $("b-milestone").value || null,
+        description: $("b-description").value,
+      };
+      if (!board.name || !board.startDate || !board.dueDate) {
+        setStatus("Nombre y fechas son obligatorios.", "err", "board-status"); return;
+      }
+      if (board.dueDate < board.startDate) {
+        setStatus("La due date no puede ser anterior al inicio.", "err", "board-status"); return;
+      }
+      const milestone = $("b-milestone").selectedOptions[0].text;
+      if (!confirm(`¿Crear el tablero "${board.name}" (${fmt(board.startDate)} → ${fmt(board.dueDate)}, ` +
+                   `${milestone})?\n\nLas tareas nuevas irán a este tablero.`)) return;
+
+      $("b-create").disabled = true;
+      setStatus("Creando tablero...", "", "board-status");
+      try {
+        const b = await call("/boards", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(board),
+        });
+        setStatus("", "", "board-status");
+        await load();  // refresca el tablero actual y la propuesta del siguiente
+        showTab("form");
+        setStatus(`✔ Tablero creado: ${b.name}. Las tareas nuevas van a este tablero.`, "ok");
+      } catch (e) {
+        if (e instanceof AuthError) { store.clear(); password = ""; showLogin(e.message); }
+        else setStatus(e.message, "err", "board-status");
+      } finally {
+        $("b-create").disabled = false;
+      }
+    });
+
+    for (const tab of document.querySelectorAll(".tabs button")) {
+      tab.addEventListener("click", () => showTab(tab.dataset.tab));
+    }
+
     document.addEventListener("keydown", (e) => {
-      if (e.ctrlKey && e.key === "Enter" && !$("app").hidden) $("form").requestSubmit();
+      if (e.ctrlKey && e.key === "Enter" && !$("app").hidden && !$("form").hidden) $("form").requestSubmit();
     });
 
     start();

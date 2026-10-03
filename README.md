@@ -1,6 +1,8 @@
 # HacknPlan Tareas
 
 Crea tareas en el último tablero del proyecto, con Design = Gameplay y las fechas del tablero.
+Desde la web también se pueden crear tableros nuevos (propone el siguiente sprint: nombre +1,
+empieza cuando vence el último y dura lo mismo); las tareas siguientes van a ese tablero.
 
 | Archivo | Para qué |
 |---|---|
