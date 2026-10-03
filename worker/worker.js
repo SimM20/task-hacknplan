@@ -12,6 +12,7 @@
  *   POST /boards -> crea un tablero nuevo (pasa a ser el "último tablero" para las tareas)
  *   POST /move   -> mueve una tanda de tareas sin terminar de un tablero a otro (la página repite
  *                   hasta que no queden; el plan gratis de Cloudflare limita las llamadas por petición)
+ *   POST /close  -> cierra un tablero; si le queda alguna tarea sin terminar, HacknPlan la pasa al destino
  */
 
 const API = "https://api.hacknplan.com/v0";
@@ -48,6 +49,9 @@ export default {
       }
       if (pathname === "/move" && request.method === "POST") {
         return json(await moveUnfinished(hp, await request.json().catch(() => ({}))));
+      }
+      if (pathname === "/close" && request.method === "POST") {
+        return json(await closeBoard(hp, await request.json().catch(() => ({}))));
       }
       return json({ error: "No encontrado" }, 404);
     } catch (err) {
@@ -235,6 +239,14 @@ async function moveUnfinished(hp, data) {
       }).catch((err) => failed.push(`#${item.workItemId} ${item.title}: ${err.message}`))));
   }
   return { moved: batch.length - failed.length, remaining: unfinished.length - batch.length, failed };
+}
+
+async function closeBoard(hp, data) {
+  const board = Number(data.boardId), target = Number(data.targetBoardId);
+  if (!board || !target || board === target) throw fail("Tableros no válidos para cerrar.");
+  // closeTasks=false: no marca nada como completado; lo que quede sin terminar pasa a 'target'
+  await hp.post(`/boards/${board}/closure`, { closeTasks: false, tasksTargetBoardId: target });
+  return { closed: board };
 }
 
 async function createTask(hp, data) {

@@ -93,6 +93,9 @@
         <div class="row"><span class="label">Tareas</span>
           <label class="check"><input type="checkbox" id="b-move" checked>
             <span id="b-move-text">Mover las tareas sin terminar del tablero actual</span></label></div>
+        <div class="row"><span class="label">Sprint anterior</span>
+          <label class="check"><input type="checkbox" id="b-close" checked>
+            <span id="b-close-text">Cerrar el tablero actual</span></label></div>
         <div class="actions">
           <button type="submit" id="b-create" class="primary" disabled>Crear tablero</button>
         </div>
@@ -215,6 +218,8 @@
         : `Mover las ${pending} tareas sin terminar de ${m.board.name} (las completadas se quedan ahí)`;
       $("b-move").checked = pending !== 0;
       $("b-move").disabled = pending === 0;
+      $("b-close-text").textContent = `Cerrar ${m.board.name} después de crear el nuevo`;
+      $("b-close").checked = true;
       $("b-create").disabled = false;
 
       setStatus("Listo. Ctrl+Enter para crear la tarea.");
@@ -314,9 +319,11 @@
       }
       const milestone = $("b-milestone").selectedOptions[0].text;
       const move = $("b-move").checked && !$("b-move").disabled;
+      const close = $("b-close").checked;
       if (!confirm(`¿Crear el tablero "${board.name}" (${fmt(board.startDate)} → ${fmt(board.dueDate)}, ` +
                    `${milestone})?\n\nLas tareas nuevas irán a este tablero.` +
-                   (move ? `\n${$("b-move-text").textContent.replace(/^Mover/, "Se moverán")}.` : ""))) return;
+                   (move ? `\n${$("b-move-text").textContent.replace(/^Mover/, "Se moverán")}.` : "") +
+                   (close ? `\n${$("b-close-text").textContent.replace(/^Cerrar/, "Se cerrará")}.` : ""))) return;
 
       $("b-create").disabled = true;
       setStatus("Creando tablero...", "", "board-status");
@@ -328,6 +335,7 @@
         });
 
         let summary = `✔ Tablero creado: ${b.name}. Las tareas nuevas van a este tablero.`, cls = "ok";
+        let moveBroke = false;
         if (move) {
           // El Worker mueve una tanda por llamada; se repite hasta que no queden (o no avance)
           let moved = 0, failed = [];
@@ -351,6 +359,25 @@
           } catch (e) {
             if (e instanceof AuthError) throw e;
             summary = `Tablero ${b.name} creado, pero falló al mover tareas (${moved} movidas): ${e.message}`;
+            cls = "err";
+            moveBroke = true;
+          }
+        }
+
+        if (close && moveBroke) {
+          summary += ` ${b.previous.name} no se cerró para que puedas revisarlo.`;
+        } else if (close) {
+          setStatus(`Tablero creado. Cerrando ${b.previous.name}...`, "", "board-status");
+          try {
+            await call("/close", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ boardId: b.previous.boardId, targetBoardId: b.boardId }),
+            });
+            summary += ` ${b.previous.name} cerrado.`;
+          } catch (e) {
+            if (e instanceof AuthError) throw e;
+            summary += ` No se pudo cerrar ${b.previous.name}: ${e.message}`;
             cls = "err";
           }
         }
